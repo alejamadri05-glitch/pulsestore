@@ -1,0 +1,8 @@
+# Development, tests and scripts. Never installed in the runtime image.
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1
+testcontainers[postgres]==4.15.0
+wfdb==4.3.1
+requests==2.34.2
+ruff==0.16.8

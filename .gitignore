@@ -1,0 +1,14 @@
+# Environment and secrets
+.venv/
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Downloaded data (PhysioNet) is never committed
+data/
+
+.DS_Store

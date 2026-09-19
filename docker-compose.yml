@@ -1,0 +1,21 @@
+# Local development only. The password is a throwaway for a container on your
+# machine; the cloud database uses a secret (see docs/runbook.md and Phase 7).
+services:
+  db:
+    image: postgres:16
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+      POSTGRES_DB: pulsestore
+    ports: ["5432:5432"]
+    volumes:
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse -d pulsestore"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  pgdata:
