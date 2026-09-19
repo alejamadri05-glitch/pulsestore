@@ -16,7 +16,7 @@ the `annotations` table, not on the raw signal.
 | Option | Rows for 48 records | Read a 10 s window | Notes |
 |---|---|---|---|
 | One row per sample `(recording_id, sample_index, value)` | ~31 million | Index range scan over 3,600 rows | Row overhead (~24 bytes header + alignment) dwarfs a 4-byte value; the table is mostly overhead |
-| **Array per fixed segment** `(recording_id, segment_index, samples REAL[])` | ~8,700 | One row, one primary-key lookup | A 3,600-sample array is ~14 kB, above the ~2 kB TOAST threshold: it is stored out of line, and compressed only if it compresses (noisy floats often don't) |
+| **Array per fixed segment** `(recording_id, segment_index, samples REAL[])` | ~8,700 (measured: 8,688) | One row, one primary-key lookup | A 3,600-sample array is ~14 kB, above the ~2 kB TOAST threshold: it is stored out of line and compressed when it compresses. Measured: 125 MB of raw samples take 58 MB (2.1×), see `docs/results.md` |
 | One blob per recording (`bytea` or large object) | 48 | Fetch and slice the whole blob | Cheapest to store, but every read pulls 30 minutes to show 10 seconds, and partial ingest is awkward |
 
 ## Decision
