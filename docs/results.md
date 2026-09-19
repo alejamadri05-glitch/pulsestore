@@ -186,3 +186,50 @@ Other controls:
 - **Dependabot** watches pip and GitHub Actions weekly.
 - **Pending, needs the GitHub side:** secret scanning and branch protection are repository
   settings, not files.
+
+## Phase 8: the same queries on Azure
+
+Same data (48 records, 109,494 annotations), same statements, measured the same way:
+`EXPLAIN (ANALYZE, BUFFERS)` per recording, three runs after a warm-up, median of the means.
+Azure is PostgreSQL 16 on Burstable B1ms (1 shared vCPU, 2 GB) in North Central US; local is
+Docker on an Apple M2.
+
+| Query | Local (M2) | Azure (B1ms) | Buffers, local → Azure |
+|---|---|---|---|
+| V beats of a recording | 0.048 ms | 0.187 ms | 31 → 31 |
+| Abnormal beats of a recording | 0.050 ms | 0.222 ms | 31 → 31 |
+| API list: one minute of beats | 0.018 ms | 0.096 ms | 5 → 5 |
+| Heart rate per minute | 1.732 ms | 6.180 ms | 39 → 40 |
+| Beat distribution, one recording | 0.648 ms | 1.372 ms | 40 → 40 |
+| Beat distribution, all 48 | 23.5 ms | 56.1 ms | 811 → 811 |
+
+**Azure runs 2–4× slower per query, and touches exactly the same buffers.** That is the point
+of Phase 6's claim that buffers are the portable number: the plans did the same work; the
+machine underneath is slower (a shared vCPU against a laptop core).
+
+### The prediction was half right
+
+Phase 6 predicted that Azure's `random_page_cost = 2` (against 4 locally) could turn the
+heart-rate query's bitmap scan into an ordered index scan and remove its sort.
+
+The access path did change: **Bitmap Heap Scan → Index Scan** on `idx_ann_rec_sample`. **The
+sort did not go away.** The window function orders by `sample_index`, but the rows pass through
+a join with `recordings` first, so the planner does not carry the index order through to the
+window. Removing that sort would need a different query shape, not a different cost setting.
+
+### Two things that differ from local and were not obvious
+
+| | Local (Docker) | Azure |
+|---|---|---|
+| `default_toast_compression` | `pglz` | **`lz4`** |
+| `signal_segments` (same 31.2 M samples) | 58 MB | **91 MB** |
+| `shared_buffers` | 128 MB | 256 MB |
+| `effective_cache_size` | 4 GB (default) | 1792 MB |
+
+- **The same data takes 57 % more space on Azure**, because the server's default TOAST
+  compression is `lz4` rather than `pglz`. lz4 is faster to compress and decompress; on this
+  signal it gives back less space. Worth knowing before sizing storage from a local test.
+- **Index size:** `annotations`' indexes are 6.6 MB on Azure against 3.9 MB locally. The Azure
+  indexes grew row by row during ingest, while the local figures were measured on indexes
+  created after the data (the Phase 6 benchmark rebuilds them). A `REINDEX` closes the gap.
+  Same reason a bulk load is usually faster with indexes created afterwards.
