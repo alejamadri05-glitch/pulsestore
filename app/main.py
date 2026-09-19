@@ -7,8 +7,19 @@ from psycopg import errors
 from psycopg.rows import dict_row
 
 from app.db import pool
-from app.queries import HEART_RATE_SQL, LIST_ANNOTATIONS_SQL
-from app.schemas import AamiClass, AnnotationBatch, RecordingIn, SegmentBatch
+from app.queries import (
+    BEAT_DISTRIBUTION_ALL_SQL,
+    BEAT_DISTRIBUTION_ONE_SQL,
+    HEART_RATE_SQL,
+    LIST_ANNOTATIONS_SQL,
+)
+from app.schemas import (
+    AamiClass,
+    AnnotationBatch,
+    BeatDistribution,
+    RecordingIn,
+    SegmentBatch,
+)
 
 
 @asynccontextmanager
@@ -135,4 +146,24 @@ def heart_rate(rid: int):
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         ensure_recording(conn, rid)
         cur.execute(HEART_RATE_SQL, {"rid": rid})
+        return cur.fetchall()
+
+
+@app.get(
+    "/stats/beat-distribution",
+    response_model=list[BeatDistribution],
+    dependencies=[Depends(require_key)],
+)
+def beat_distribution(recording_id: int | None = Query(None, ge=1)):
+    """Beats per AAMI class for every recording, or for one with `recording_id`.
+
+    Recordings without annotations are included with zeros rather than left out, so a client
+    can tell "no beats yet" from "no such recording" (which is a 404).
+    """
+    with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        if recording_id is None:
+            cur.execute(BEAT_DISTRIBUTION_ALL_SQL)
+        else:
+            ensure_recording(conn, recording_id)
+            cur.execute(BEAT_DISTRIBUTION_ONE_SQL, {"rid": recording_id})
         return cur.fetchall()

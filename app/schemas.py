@@ -37,3 +37,15 @@ class AnnotationIn(BaseModel):
 
 class AnnotationBatch(BaseModel):
     items: list[AnnotationIn] = Field(min_length=1, max_length=50_000)
+
+
+class BeatDistribution(BaseModel):
+    recording_id: int
+    source_record: str | None
+    lead_name: str
+    N: int = Field(description="Normal and bundle-branch beats")
+    S: int = Field(description="Supraventricular ectopic beats")
+    V: int = Field(description="Ventricular ectopic beats")
+    F: int = Field(description="Fusion beats")
+    Q: int = Field(description="Paced or unclassifiable beats")
+    total: int

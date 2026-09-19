@@ -113,6 +113,51 @@ recording. **Kept as is, on purpose**: splitting the statement per filter combin
 remove a 0.13 ms penalty at the price of more code paths. It would be worth doing if a
 recording held millions of beats, or for a filter without a selective leading column.
 
+### What surprised me
+
+What surprised me most was how little the biggest speed-ups told me. Indexes made most queries
+80 to 190 times faster, but the heart-rate query improved only 3.8×, because its time was never
+spent finding rows: it was spent in the window function and the sort. The second surprise was
+that the build guide's own least-privilege role would have broken the API. PostgreSQL checks
+UPDATE privilege for `INSERT … ON CONFLICT DO UPDATE` even when nothing conflicts, and I only
+found out because the test suite runs as that role. The third was being wrong in writing: my
+first ADR said noisy float arrays would not compress, and TOAST compressed them 2.1×. And the
+same optional-filter pattern that cost 1.4× in one endpoint would have cost about 55× in another,
+because whether PostgreSQL can push a filter down depends on the shape of the query, not on
+the pattern. The habit I am keeping is the one this project is built around: measure first,
+and let the measurement correct the design document, not the other way round.
+
+## Beat-distribution endpoint
+
+`GET /stats/beat-distribution[?recording_id=…]` returns beats per AAMI class, one row per
+recording. Checked against the real data: the class totals over the 48 recordings match the
+Phase 4 counts exactly, and record 100 gives N 2,239 · S 33 · V 1, its published count.
+
+Two versions of the all-recordings query, same harness, median of 7 runs:
+
+| Shape | Median | Plan |
+|---|---|---|
+| Join 109,494 annotations to recordings, then aggregate | 32.9 ms | Hash join, then hash aggregate over every joined row |
+| **Aggregate annotations by recording (48 groups), then join** | **21.6 ms** | Hash aggregate on the scan, then join 48 rows |
+
+For a single recording, the optional-filter pattern used by the list endpoint turned out to be
+a trap here, measured with a generic prepared plan on record 208:
+
+| Filter | Plan | Execution |
+|---|---|---|
+| `(rid IS NULL OR r.id = rid)` | Aggregates all 109,494 annotations, keeps 1 of 48 groups | 15.3 ms |
+| **`r.id = rid`** | Filter pushed inside the aggregation, index scan | **0.28 ms** |
+
+PostgreSQL can push an equality on the grouping column into the aggregated subquery, but not an
+`OR` with a parameter. So this endpoint uses **two statements**, one per case, while the list
+endpoint keeps the optional pattern: there it costs 1.4×, here it would cost about 55×.
+
+Final statements as shipped: all recordings 23.5 ms (807 buffers, a sequential scan is
+unavoidable when every row is counted); one recording 0.65 ms (39 buffers, composite index).
+Annotations never change after ingest, so if the all-recordings call became hot, a summary
+table maintained at ingest would make it read 48 rows instead of 109,494. Not built, because
+nothing calls it often yet.
+
 ## Phase 7: security
 
 The API connects as `pulse_app` (`migrations/003_app_role.sql`), never as the admin user. The

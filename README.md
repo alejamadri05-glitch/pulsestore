@@ -35,6 +35,7 @@ All measured, all reproducible with the scripts in `scripts/`. Environment and r
 | One minute of beats for a recording | 3.41 ms → **0.018 ms**, 806 → 5 buffers (composite index) |
 | Abnormal beats of a recording | 4.74 ms → **0.050 ms**, 806 → 31 buffers (partial index) |
 | Heart rate per minute | 6.54 ms → 1.73 ms: the window function and sort dominate, not the scan |
+| Beats per class, all recordings | 32.9 → 21.6 ms by aggregating before joining; one recording 0.65 ms |
 | Cost of the indexes on ingest | composite +61 %, partial +1 % |
 
 Three findings worth more than the speed-ups:
@@ -44,8 +45,10 @@ Three findings worth more than the speed-ups:
 - **The build guide's database role would have broken the API.** `INSERT … ON CONFLICT DO
   UPDATE` needs UPDATE privilege even when nothing conflicts. The fix is a column-level grant,
   `UPDATE (model) ON devices`, verified by tests that run the whole suite as that role.
-- **A generic prepared plan loses the partial index** for the API's optional-filter query
-  (0.326 → 0.458 ms). Measured, understood, and kept, with the reasoning written down.
+- **The same query pattern is fine in one place and a trap in another.** An optional filter,
+  `(param IS NULL OR col = param)`, costs 1.4× on the list endpoint (kept), but about 55× on the
+  beat distribution, where it blocks pushing the filter into an aggregation (split into two
+  statements).
 
 ## Design decisions
 
@@ -90,7 +93,7 @@ DATABASE_URL=$ADMIN_DATABASE_URL PYTHONPATH=. .venv/bin/python scripts/bench_que
 |---|---|
 | Schema, ADRs, local API | Done |
 | Load all 48 records, ingest benchmark | Done |
-| Tests against real PostgreSQL (26) | Done |
+| Tests against real PostgreSQL (31) | Done |
 | Query tuning with before/after numbers | Done |
 | Least-privilege role, parameterized SQL, Dependabot | Done |
 | CI: lint and tests on every push | Done, green on GitHub (PostgreSQL 16 via Testcontainers) |

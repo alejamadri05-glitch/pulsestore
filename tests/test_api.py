@@ -137,3 +137,60 @@ def test_annotation_filters_by_class_and_range(client, auth, recording):
         headers=auth,
     )
     assert [a["sample_index"] for a in r.json()] == [360 * 3 + 100, 360 * 8 + 100]
+
+
+# --- beat distribution --------------------------------------------------------------
+
+
+def post_mixed_beats(client, auth, rid):
+    """5 N, 1 S, 2 V, 0 F and 3 Q, at distinct sample positions."""
+    classes = ["N"] * 5 + ["S"] + ["V"] * 2 + ["Q"] * 3
+    items = [
+        {"sample_index": 360 * (i + 1), "symbol": c, "aami_class": c} for i, c in enumerate(classes)
+    ]
+    r = client.post(f"/recordings/{rid}/annotations", json={"items": items}, headers=auth)
+    assert r.status_code == 201
+
+
+def test_beat_distribution_counts_each_class(client, auth, recording):
+    post_mixed_beats(client, auth, recording)
+    r = client.get("/stats/beat-distribution", params={"recording_id": recording}, headers=auth)
+    assert r.status_code == 200
+    [row] = r.json()
+    assert {k: row[k] for k in ("N", "S", "V", "F", "Q", "total")} == {
+        "N": 5,
+        "S": 1,
+        "V": 2,
+        "F": 0,
+        "Q": 3,
+        "total": 11,
+    }
+    assert row["recording_id"] == recording and row["lead_name"] == "MLII"
+
+
+def test_recording_without_annotations_reports_zeros_not_one(client, auth, recording):
+    """No annotations means no group: the LEFT JOIN yields NULLs, which must become 0."""
+    r = client.get("/stats/beat-distribution", params={"recording_id": recording}, headers=auth)
+    [row] = r.json()
+    assert row["total"] == 0
+    assert all(row[c] == 0 for c in "NSVFQ")
+
+
+def test_beat_distribution_lists_every_recording_consistently(client, auth, recording):
+    post_mixed_beats(client, auth, recording)
+    rows = client.get("/stats/beat-distribution", headers=auth).json()
+    ids = [row["recording_id"] for row in rows]
+    assert recording in ids
+    assert ids == sorted(ids)
+    for row in rows:
+        assert row["total"] == sum(row[c] for c in "NSVFQ")
+
+
+def test_beat_distribution_for_unknown_recording_is_404(client, auth):
+    r = client.get("/stats/beat-distribution", params={"recording_id": 999999}, headers=auth)
+    assert r.status_code == 404
+
+
+def test_beat_distribution_rejects_invalid_ids_and_missing_keys(client, auth):
+    assert client.get("/stats/beat-distribution?recording_id=0", headers=auth).status_code == 422
+    assert client.get("/stats/beat-distribution").status_code == 401
