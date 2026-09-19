@@ -93,7 +93,7 @@ DATABASE_URL=$ADMIN_DATABASE_URL PYTHONPATH=. .venv/bin/python scripts/bench_que
 | Tests against real PostgreSQL (26) | Done |
 | Query tuning with before/after numbers | Done |
 | Least-privilege role, parameterized SQL, Dependabot | Done |
-| CI: lint and tests on every push | Written; runs once the repository is on GitHub |
+| CI: lint and tests on every push | Done, green on GitHub (PostgreSQL 16 via Testcontainers) |
 | Docker image (293 MB, non-root, runtime deps only) | Done, verified locally |
 | Azure: Flexible Server, Container Apps, monitoring, OIDC deploy | Next |
 | Load test | Next |
