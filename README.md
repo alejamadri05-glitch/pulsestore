@@ -97,7 +97,8 @@ DATABASE_URL=$ADMIN_DATABASE_URL PYTHONPATH=. .venv/bin/python scripts/bench_que
 | Query tuning with before/after numbers | Done |
 | Least-privilege role, parameterized SQL, Dependabot | Done |
 | CI: lint and tests on every push | Done, green on GitHub (PostgreSQL 16 via Testcontainers) |
-| Docker image (293 MB, non-root, runtime deps only) | Done, verified locally |
+| Docker image (326 MB, non-root, runtime deps only), published to GHCR from `main` | Done |
+| API authenticates to Azure with Entra tokens (`DB_AUTH=entra`), no password | Done, verified against Azure |
 | Azure Database for PostgreSQL: Entra-only auth, migrations, `pg_stat_statements` ([docs/azure.md](docs/azure.md)) | Done |
 | Azure: Container Apps, monitoring, OIDC deploy | Next |
 | Load test | Next |

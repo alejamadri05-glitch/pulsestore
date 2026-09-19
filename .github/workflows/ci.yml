@@ -29,3 +29,30 @@ jobs:
 
   # The deploy job (OIDC login to Azure, Container Apps) is added in Phase 10,
   # once the Azure resources exist.
+
+  # Publishes the API image to GitHub Container Registry, only from main and only after the
+  # tests pass, so the registry never holds an image CI rejected. Azure Container Apps pulls
+  # it from there (free for public images; Azure Container Registry would bill ~USD 5/month).
+  image:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tagged by commit, so a deployment names exactly what it runs; `latest` for humans.
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest

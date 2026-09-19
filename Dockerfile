@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+# Links the GitHub Container Registry package to this repository.
+LABEL org.opencontainers.image.source="https://github.com/alejamadri05-glitch/pulsestore" \
+      org.opencontainers.image.description="PulseStore API: ECG recordings on PostgreSQL" \
+      org.opencontainers.image.licenses="MIT"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

@@ -4,3 +4,5 @@ uvicorn[standard]==0.53.0
 pydantic==2.13.5
 psycopg[binary]==3.3.6
 psycopg-pool==3.3.2
+# Entra token authentication (DB_AUTH=entra); imported only in that mode.
+azure-identity==1.25.3

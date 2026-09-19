@@ -86,6 +86,37 @@ in `shared_preload_libraries`.
 | Round trip from the author's laptop (Costa Rica) | < 1 ms | ~110 ms per statement | Network, not the database. The API will run next to the database, so its queries do not pay this. |
 | New connection | a few ms | ~1.2 s (TLS 1.3 + token validation) | Why the API keeps a connection pool rather than connecting per request. |
 
+## API authentication: Entra tokens instead of a password
+
+`app/db.py` has two modes, chosen by `DB_AUTH`:
+
+| `DB_AUTH` | `DATABASE_URL` | Used by |
+|---|---|---|
+| `password` (default) | includes the password | local Docker database, CI (Testcontainers) |
+| `entra` | **no password** | Azure. Each new connection gets a fresh Entra token as its password |
+
+The token comes from `DefaultAzureCredential`: the Container App's managed identity in Azure,
+or the developer's `az login` on a laptop, so the same code runs in both places. PostgreSQL
+checks the password only when a connection opens, so pooled connections stay valid after
+their token expires and are never torn down for that reason. azure-identity caches tokens, so
+asking for one per new connection costs a network call about once an hour.
+
+Verified twice:
+
+- **Without Azure**, in `tests/test_db.py`: a fake credential hands out the test role's real
+  password as its "token". The connection succeeds, one token is requested per new
+  connection, and the same connection string without the token is refused.
+- **Against Azure**: the API ran on the laptop with `DB_AUTH=entra` and a connection string
+  with no password, took its token from `az login`, and served `/healthz` and queries from the
+  Azure database.
+
+`azure-identity` adds 33 MB to the image (293 → 326 MB), mostly `cryptography`. It is imported
+only in Entra mode.
+
+The image is published to GitHub Container Registry by the `image` job in
+`.github/workflows/ci.yml`: only on `main`, only after the tests pass, tagged with the commit
+SHA so a deployment names exactly the code it runs.
+
 ## Things that went wrong while creating it
 
 Recorded because each one will happen to the next person too:
