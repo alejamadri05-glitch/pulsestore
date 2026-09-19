@@ -19,9 +19,9 @@ flowchart LR
 
 The loader posts recordings the way a device fleet would: one recording, then its signal in
 10-second segments, then its beat annotations. The service writes annotations with `COPY` and
-serves heart rate per minute and filtered beat lists. It runs locally today; the Azure
-deployment (Database for PostgreSQL Flexible Server, Container Apps, Application Insights) is
-the next phase.
+serves heart rate per minute and filtered beat lists. The database runs on Azure Database for
+PostgreSQL Flexible Server with Microsoft Entra authentication only, so no password exists
+anywhere; the API moves to Azure Container Apps next ([docs/azure.md](docs/azure.md)).
 
 ## Results
 
@@ -98,7 +98,8 @@ DATABASE_URL=$ADMIN_DATABASE_URL PYTHONPATH=. .venv/bin/python scripts/bench_que
 | Least-privilege role, parameterized SQL, Dependabot | Done |
 | CI: lint and tests on every push | Done, green on GitHub (PostgreSQL 16 via Testcontainers) |
 | Docker image (293 MB, non-root, runtime deps only) | Done, verified locally |
-| Azure: Flexible Server, Container Apps, monitoring, OIDC deploy | Next |
+| Azure Database for PostgreSQL: Entra-only auth, migrations, `pg_stat_statements` ([docs/azure.md](docs/azure.md)) | Done |
+| Azure: Container Apps, monitoring, OIDC deploy | Next |
 | Load test | Next |
 
 ## Data
