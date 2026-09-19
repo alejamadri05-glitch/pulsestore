@@ -7,6 +7,7 @@ from psycopg import errors
 from psycopg.rows import dict_row
 
 from app.db import pool
+from app.queries import HEART_RATE_SQL, LIST_ANNOTATIONS_SQL
 from app.schemas import AamiClass, AnnotationBatch, RecordingIn, SegmentBatch
 
 
@@ -123,34 +124,10 @@ def list_annotations(
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         ensure_recording(conn, rid)
         cur.execute(
-            """SELECT sample_index, symbol, aami_class FROM annotations
-               WHERE recording_id = %s AND sample_index >= %s
-                 AND (%s::bigint IS NULL OR sample_index < %s)
-                 AND (%s::text IS NULL OR aami_class = %s)
-               ORDER BY sample_index LIMIT %s""",
-            (rid, start, end, end, aami_class, aami_class, limit),
+            LIST_ANNOTATIONS_SQL,
+            {"rid": rid, "start": start, "end": end, "cls": aami_class, "limit": limit},
         )
         return cur.fetchall()
-
-
-HEART_RATE_SQL = """
-WITH beats AS (
-  SELECT a.sample_index,
-         r.sampling_rate_hz AS fs,
-         (a.sample_index - lag(a.sample_index) OVER (ORDER BY a.sample_index))::float
-           / r.sampling_rate_hz AS rr_s
-  FROM annotations a
-  JOIN recordings r ON r.id = a.recording_id
-  WHERE a.recording_id = %(rid)s AND a.aami_class <> 'Q'
-)
-SELECT floor(sample_index / (fs * 60.0))::int AS minute,
-       round((60.0 / avg(rr_s))::numeric, 1)   AS mean_hr_bpm,
-       count(*)                                 AS beats
-FROM beats
-WHERE rr_s IS NOT NULL
-GROUP BY 1
-ORDER BY 1;
-"""
 
 
 @app.get("/recordings/{rid}/heart-rate", dependencies=[Depends(require_key)])

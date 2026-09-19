@@ -31,9 +31,9 @@ prediction of cloud latency; Azure numbers go in their own column once the servi
 
 **Storage surprise.** The raw signal is 31.2 million samples × 4 bytes = 125 MB, but the table
 takes 58 MB: TOAST compressed it 2.1×. I expected noisy floats not to compress and wrote so in
-the first draft of ADR 0001. MIT-BIH samples are 11-bit ADC values scaled by a gain of 200, so
-after rounding to four decimals there are few distinct values and long repeated byte patterns,
-which `pglz` handles well. ADR 0001 now carries the measured figure.
+the first draft of ADR 0001. A likely reason, not measured separately: MIT-BIH samples are
+11-bit ADC values divided by a gain of 200, so there are at most 2,048 distinct values and the
+bytes repeat a lot, which `pglz` can exploit. ADR 0001 now carries the measured figure.
 
 **Data finding.** Records 102 and 104 have no MLII lead (only V5 and V2). The loader prefers
 MLII, falls back to the first lead, and stores the lead name it actually used, which is what
@@ -56,5 +56,59 @@ its check constraints, foreign key and WAL), committed, median of 3 interleaved 
 - **The naive loop is the real anti-pattern**, and it is 8.5× slower than `executemany`.
   psycopg 3 sends `executemany` in pipeline mode, one network round trip per batch rather than
   per row, so most of the "COPY is 30× faster" folklore is really "round trips are expensive".
-- Signal segments still use `executemany`: at 20 segments per request the batch is small and
-  each row is a 14 kB array, so the per-row overhead that COPY removes is not what dominates.
+- Signal segments still use `executemany`, as in the guide. Not measured yet: with 20 rows of
+  14 kB arrays per request, per-row overhead is probably not what dominates, but that is a guess
+  until someone benchmarks it.
+
+## Phase 6: query tuning
+
+`python scripts/bench_queries.py` (with `PYTHONPATH=.`). Each query runs as
+`EXPLAIN (ANALYZE, BUFFERS)` once per recording, for all 48, three times after a warm-up;
+the table shows the median of the per-call mean. Buffers and plans are for MIT-BIH record 208.
+The SQL is imported from `app/queries.py`, so what is measured is what the API sends.
+
+**Buffers are the number to trust across machines.** Milliseconds here are a laptop with the
+whole table in cache; buffers touched are a property of the plan and will be the same on Azure.
+
+| Query | No indexes | Composite | Composite + partial | Speed-up | Buffers | Plan change |
+|---|---|---|---|---|---|---|
+| V beats of a recording | 3.779 ms | 0.188 ms | **0.048 ms** | 79× | 806 → 38 → 31 | Seq Scan → Bitmap (composite) → Index Scan (partial) |
+| Abnormal beats of a recording | 4.736 ms | 0.224 ms | **0.050 ms** | 95× | 806 → 38 → 31 | Seq Scan → Bitmap (composite) → Index Scan (partial) |
+| API list: one minute of beats | 3.408 ms | **0.018 ms** | 0.018 ms | 189× | 806 → 5 → 5 | Seq Scan → Index Scan (composite) |
+| Heart rate per minute | 6.544 ms | 1.767 ms | **1.732 ms** | 3.8× | 807 → 39 → 39 | Seq Scan → Bitmap (composite), still sorts |
+| **Write cost:** COPY of 109,494 rows | 490 ms | 790 ms (+61 %) | 797 ms (+63 %) | — | — | Index size 0 → 3.3 → 3.9 MB |
+
+The indexes are in `migrations/002_indexes.sql`.
+
+### Findings
+
+1. **The heart-rate query barely moved (3.8×) while the others improved 80–190×.** Finding
+   the rows got cheap (807 → 39 buffers), but the query's cost is the window function, the
+   sort and the aggregation, not the scan. The plan is a bitmap scan followed by a sort: with
+   the default `random_page_cost = 4`, the planner prefers a bitmap scan over an ordered index
+   scan for ~3,000 rows, so it has to sort afterwards. Next experiment: repeat it on Azure and
+   with a `random_page_cost` suited to SSD storage, where an ordered index scan could drop the
+   sort. Heart rate never changes after ingest, so caching it (Phase 11) may matter more.
+2. **The planner used the partial index for `aami_class = 'V'`.** The index is defined for
+   `aami_class <> 'N'`, and PostgreSQL proved on its own that `'V'` implies `<> 'N'`.
+3. **The composite index cost 61 % on ingest; the partial one cost 1 %.** The partial index
+   covers 17 % of rows and is 0.6 MB. For 4.5× faster abnormal-beat queries it is the cheapest
+   win in this table.
+
+### The optional-filter pattern and generic plans
+
+The API uses one statement for every filter combination:
+`(%(cls)s::text IS NULL OR aami_class = %(cls)s)`. psycopg 3 prepares a statement on the server
+after 5 executions, and PostgreSQL may then switch to a generic plan that does not see
+parameter values. Measured with `PREPARE` and `plan_cache_mode`, record 208, all V beats:
+
+| Plan | Index used | Execution |
+|---|---|---|
+| Custom (sees `'V'`) | `idx_ann_abnormal` (partial) | 0.326 ms |
+| Generic (sees `$4`) | `idx_ann_rec_sample` + filter | 0.458 ms (1.4×) |
+
+The generic plan cannot prove that an unknown `$4` excludes `'N'`, so it loses the partial
+index. Here the cost is 1.4× because the composite index still bounds the scan to one
+recording. **Kept as is, on purpose**: splitting the statement per filter combination would
+remove a 0.13 ms penalty at the price of more code paths. It would be worth doing if a
+recording held millions of beats, or for a filter without a selective leading column.
