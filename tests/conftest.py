@@ -1,5 +1,6 @@
 import os
 import pathlib
+import secrets
 import uuid
 
 import pytest
@@ -17,6 +18,7 @@ MIGRATIONS = sorted(pathlib.Path(__file__).parents[1].joinpath("migrations").glo
 
 @pytest.fixture(scope="session")
 def database_url():
+    """Admin connection: runs the migrations and owns the tables."""
     with PostgresContainer("postgres:16", driver=None) as pg:
         url = pg.get_connection_url()
         import psycopg
@@ -28,8 +30,26 @@ def database_url():
 
 
 @pytest.fixture(scope="session")
-def client(database_url):
-    os.environ["DATABASE_URL"] = database_url
+def app_database_url(database_url):
+    """The least-privilege role from 003_app_role.sql, with a throwaway password.
+
+    The whole API test suite connects as this role, so every test also checks that the
+    service works without the privileges it was deliberately not given.
+    """
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    password = secrets.token_urlsafe(24)
+    with psycopg.connect(database_url, autocommit=True) as conn:
+        # Utility statements cannot take bound parameters; sql.Literal quotes safely.
+        conn.execute(sql.SQL("ALTER ROLE pulse_app PASSWORD {}").format(sql.Literal(password)))
+    return make_conninfo(database_url, user="pulse_app", password=password)
+
+
+@pytest.fixture(scope="session")
+def client(app_database_url):
+    os.environ["DATABASE_URL"] = app_database_url
     os.environ["API_KEY"] = "test-key"
     from fastapi.testclient import TestClient
 

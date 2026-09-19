@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff
+        run: |
+          ruff check .
+          ruff format --check .
+      # Testcontainers starts PostgreSQL 16 with the runner's Docker: tests hit a real database.
+      - name: Pytest
+        run: pytest -q
+
+  # The deploy job (OIDC login to Azure, Container Apps) is added in Phase 10,
+  # once the Azure resources exist.

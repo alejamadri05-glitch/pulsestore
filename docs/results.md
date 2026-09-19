@@ -112,3 +112,32 @@ index. Here the cost is 1.4× because the composite index still bounds the scan 
 recording. **Kept as is, on purpose**: splitting the statement per filter combination would
 remove a 0.13 ms penalty at the price of more code paths. It would be worth doing if a
 recording held millions of beats, or for a filter without a selective leading column.
+
+## Phase 7: security
+
+The API connects as `pulse_app` (`migrations/003_app_role.sql`), never as the admin user. The
+whole test suite runs as that role, so every test also checks that the service works without
+the privileges it was not given.
+
+**Two corrections to the build guide's role, both verified against PostgreSQL 16:**
+
+| Guide's grant | What happens | Fix |
+|---|---|---|
+| `SELECT, INSERT` only | `POST /recordings` fails on **every** request: `INSERT … ON CONFLICT DO UPDATE` needs UPDATE privilege even when no conflict occurs. Removing the fix makes 10 tests fail with `permission denied for table devices`. | `GRANT UPDATE (model) ON devices`: column-level. The role can refresh a device's model but cannot rewrite its serial number (tested). |
+| `USAGE ON ALL SEQUENCES` | Not needed: identity columns, unlike `serial`, do not require it. | Not granted. Least privilege means not granting what is not used. |
+
+Tested as `pulse_app`, all refused with `InsufficientPrivilege`: `DELETE`, `TRUNCATE`,
+`UPDATE devices SET serial_number`, `UPDATE recordings SET subject_code`, `DROP TABLE`,
+`CREATE TABLE`, `ALTER TABLE`. The role is not a superuser and owns no relation.
+
+Other controls:
+
+- **SQL is parameterized everywhere.** The only composed statement is `ALTER ROLE … PASSWORD`,
+  which cannot take bound parameters; it uses `psycopg.sql.Literal`, not string formatting.
+- **API keys are compared in constant time** (`secrets.compare_digest`), and a missing key is
+  401, not 422.
+- **No secrets in git:** `.env` is ignored and `.env.example` documents every variable. The
+  role's password is set outside the migration, from a secret store.
+- **Dependabot** watches pip and GitHub Actions weekly.
+- **Pending, needs the GitHub side:** secret scanning and branch protection are repository
+  settings, not files.

@@ -115,8 +115,9 @@ def main() -> None:
             "SELECT id FROM recordings WHERE source_record = %s", (args.representative,)
         ).fetchone()[0]
         rows = conn.execute(
-            f"""SELECT sample_index, symbol, aami_class FROM annotations
-                WHERE recording_id IN ({",".join(map(str, recordings))})"""  # noqa: S608 - ints
+            """SELECT sample_index, symbol, aami_class FROM annotations
+               WHERE recording_id = ANY(%s)""",
+            (recordings,),
         ).fetchall()
 
         results = []
