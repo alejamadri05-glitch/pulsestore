@@ -16,7 +16,6 @@ import io
 import os
 import sys
 import time
-import urllib.request
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,8 +46,19 @@ def download(dest: Path) -> None:
     if (dest / "234.atr").exists():
         return
     print(f"Downloading {MITDB_ZIP} (77 MB)…", flush=True)
-    with urllib.request.urlopen(MITDB_ZIP, timeout=120) as resp:  # noqa: S310 - fixed https URL
-        archive = zipfile.ZipFile(io.BytesIO(resp.read()))
+    # requests ships its own CA bundle (certifi). urllib relies on the system's, which the
+    # python.org macOS installer leaves unconfigured: it fails with CERTIFICATE_VERIFY_FAILED.
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(MITDB_ZIP, timeout=300)
+            resp.raise_for_status()
+            break
+        except requests.RequestException as exc:  # PhysioNet answers 5xx now and then
+            if attempt == 3:
+                raise
+            print(f"  attempt {attempt} failed ({exc}); retrying in {10 * attempt} s", flush=True)
+            time.sleep(10 * attempt)
+    archive = zipfile.ZipFile(io.BytesIO(resp.content))
     root = archive.namelist()[0].split("/")[0]
     expected = {}
     for line in archive.read(f"{root}/SHA256SUMS.txt").decode().splitlines():
