@@ -157,6 +157,63 @@ That is the honest trade-off: a narrow rule that needs a script after each redep
 `0.0.0.0` (which means every Azure customer's resources, not just yours). Password or token
 authentication is still required either way.
 
+## Monitoring, alerting and the drill
+
+```bash
+# Application Insights, workspace-based (free within the workspace's 5 GB/month)
+az rest --method put --url ".../microsoft.insights/components/ai-pulsestore?api-version=2020-02-02" \
+  --body '{"location":"northcentralus","kind":"web","properties":{"Application_Type":"web",
+           "WorkspaceResourceId":"<log-pulsestore id>","IngestionMode":"LogAnalytics"}}'
+
+az containerapp secret set -g rg-pulsestore -n pulsestore-api \
+  --secrets "appinsights-connection=<connection string>"
+az containerapp update -g rg-pulsestore -n pulsestore-api \
+  --image ghcr.io/alejamadri05-glitch/pulsestore:<commit sha> \
+  --set-env-vars APPLICATIONINSIGHTS_CONNECTION_STRING=secretref:appinsights-connection
+
+az monitor action-group create -g rg-pulsestore -n ag-pulsestore --short-name pulsestore \
+  --action email alejandro <email> --tags <the seven tags>
+az monitor metrics alert create -n pg-cpu-high -g rg-pulsestore --scopes <server id> \
+  --condition "avg cpu_percent > 80" --window-size 5m --evaluation-frequency 1m --severity 2 \
+  --action <action group id> --tags <the seven tags>
+```
+
+The image is pinned by commit SHA, not `latest`, so the running revision names the code it runs.
+
+**Measured in production**, server side, from Application Insights after the deployment:
+
+| Signal | Value |
+|---|---|
+| `GET /recordings/{id}/heart-rate` | p95 12 ms |
+| `GET /stats/beat-distribution` | p95 21 ms |
+| `postgresql` `SELECT` dependencies | p95 8 ms |
+| `annotations_ingested` / `ingest_batch_size` | 120 beats, batch of 120, from a real ingest |
+
+**Two instrumentation traps, both found by looking instead of assuming:**
+
+1. `configure_azure_monitor()` sent metrics, performance counters and its own dependencies, but
+   `AppRequests` stayed empty. It instruments the FastAPI *class*, and that did not cover this
+   app; `FastAPIInstrumentor.instrument_app(app)` on the instance fixed it.
+2. Database calls needed `opentelemetry-instrumentation-psycopg`: the Azure package only ships
+   the psycopg2 one. They now arrive as `postgresql` dependencies, and the pooled connections
+   are traced (checked with an in-memory exporter before trusting it).
+
+Reading logs and querying telemetry on these environments:
+
+```bash
+# `az containerapp logs show` fails here (KeyError: 'eventStreamEndpoint') and the
+# log-analytics CLI extension will not install on this CLI build. Query the API directly:
+az rest --method post --url "https://api.loganalytics.io/v1/workspaces/<customerId>/query" \
+  --resource "https://api.loganalytics.io" \
+  --body '{"query":"AppRequests | where TimeGenerated > ago(1h) | summarize p95=percentile(DurationMs,95) by Name"}'
+```
+
+The alert was fired on purpose and written up in
+[`docs/postmortems/2026-09-22-cpu-alert-drill.md`](postmortems/2026-09-22-cpu-alert-drill.md):
+CPU held 83.3 % over five minutes, `pg_stat_statements` named the offending query in seconds,
+and `/healthz` stayed green the whole time, which is exactly why a health check is not a
+capacity alarm.
+
 ## Things that went wrong while creating it
 
 Recorded because each one will happen to the next person too:

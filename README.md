@@ -61,6 +61,20 @@ Three findings worth more than the speed-ups:
 - `text` + `CHECK` instead of `char(1)`; indexes added only after measuring without them
   ([`migrations/002_indexes.sql`](migrations/002_indexes.sql)).
 
+## Operations
+
+- **Telemetry:** OpenTelemetry to Application Insights. Requests, database calls as
+  `postgresql` dependencies, and two service metrics on the ingest path
+  (`annotations_ingested`, `ingest_batch_size`). `/healthz` reports whether telemetry is on,
+  which separates a broken deployment from a misconfigured one.
+- **Measured in production** (server-side, from Application Insights): `GET /heart-rate` p95
+  12 ms, `GET /stats/beat-distribution` p95 21 ms, `SELECT` dependencies p95 8 ms.
+- **Alert:** database CPU above 80 % for 5 minutes emails an action group. Exercised by
+  loading the database on purpose, which is written up in
+  [docs/postmortems/](docs/postmortems/).
+- **[Runbook](docs/runbook.md):** what each alert means, the first commands to run, the known
+  causes with their fixes, and the recovery steps in order of disruption.
+
 ## Security
 
 - The API connects as `pulse_app` ([`migrations/003_app_role.sql`](migrations/003_app_role.sql)):
