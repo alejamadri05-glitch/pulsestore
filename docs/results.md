@@ -233,3 +233,68 @@ window. Removing that sort would need a different query shape, not a different c
   indexes grew row by row during ingest, while the local figures were measured on indexes
   created after the data (the Phase 6 benchmark rebuilds them). A `REINDEX` closes the gap.
   Same reason a bulk load is usually faster with indexes created afterwards.
+
+## Phase 11: load test against the deployed service
+
+`loadtest/locustfile.py`, run from a laptop in Costa Rica against North Central US, so every
+number below carries ~110 ms of network. Server-side figures come from Application Insights.
+Raw Locust CSVs are in `docs/loadtest/`.
+
+### The first run found two bugs, not a number
+
+20 users: **95 requests, every one a 503**, while the database sat at 10 % CPU.
+
+1. The firewall pinned one outbound IP; the address rotates within a pool, so a replica that
+   started on another address could not reach the database.
+2. Worse, the pool was opened with `wait=True`: an unreachable database killed the container at
+   startup, so the platform returned an opaque 503 and the replica crash-looped.
+
+Both are fixed (`pool.open()` without waiting; `/healthz` answers 503 naming the failure; the
+firewall allows Azure services and authentication is the control). **A load test earns its
+keep the first time it runs, even when it produces no performance data.**
+
+### Baseline, after the fixes
+
+| Load | Requests | Failures | Throughput | p50 | p95 | Database CPU | Replicas |
+|---|---|---|---|---|---|---|---|
+| 20 users, 3 min | 2,495 | 0 | 13.9 req/s | 120 ms | 220 ms | 24 % | 2 |
+| 100 users, 3 min | 12,606 | 0 | 70.1 req/s | 120 ms | 240 ms | 61 % | 2 |
+
+At 20 users the test measures the client, not the service: with a 0.5–2 s think time, 20 users
+cannot ask for more than ~16 req/s. At 100 users the database is the resource under pressure,
+and `/stats/beat-distribution` without a recording id — the only query that reads every row —
+is the slowest endpoint at p95 490 ms end to end, 145 ms server side.
+
+### The change: cache that one endpoint for 30 seconds
+
+Its answer changes only when data is written, so it is cached per replica and invalidated on
+ingest. Same load, 100 users, 3 minutes:
+
+| Measure | Before | After |
+|---|---|---|
+| Database CPU | 61 % | **32 %** |
+| `/stats/beat-distribution`, server side p95 | 145 ms | **65 ms** |
+| `/recordings/{id}/heart-rate`, server side p95 | 36 ms | **112 ms** |
+| End to end p95, all endpoints | 240 ms | 490 ms |
+| Throughput | 70.1 req/s | 68.0 req/s |
+
+**The cache did what it was for: database CPU halved and the cached endpoint's server-side p95
+dropped by 55 %.** Everything else got slower, and I cannot explain it from the data.
+
+What was ruled out: **burstable CPU credits**, the obvious suspect after the alert drill, stayed
+at 141–142 of 149 throughout, so the server was never throttled. Replica count was 2 in both
+runs.
+
+What remains: this comparison is not clean enough to attribute the regression. Each run is a
+single three-minute sample, the Application Insights bins do not line up with the run
+boundaries, the two runs used different revisions, and the client is on the far side of the
+public internet. **The honest conclusion is "database load halved, end-to-end latency
+unexplained", not "the cache made it slower".**
+
+### How I would run it next time
+
+- Alternate A/B in the same session rather than one run each, and repeat three times.
+- Drive the load from inside Azure, so the ~110 ms internet path stops dominating p50.
+- Compare per-replica, using `AppRoleInstance`, to separate a cold replica from a slow one.
+- Alert on p95 request duration, which is what this test measures and what the current CPU
+  alert deliberately ignores.

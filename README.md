@@ -38,6 +38,7 @@ All measured, all reproducible with the scripts in `scripts/`. Environment and r
 | Heart rate per minute | 6.54 ms → 1.73 ms: the window function and sort dominate, not the scan |
 | Beats per class, all recordings | 32.9 → 21.6 ms by aggregating before joining; one recording 0.65 ms |
 | Same queries on Azure (B1ms) | 2–4× slower than the laptop, **identical buffer counts**; `lz4` there stores the same signal in 91 MB against 58 MB with `pglz` |
+| Deployed service under load | 70 req/s, 0 failures, p95 240 ms end to end from Costa Rica; caching the one full-scan endpoint halved database CPU (61 % → 32 %) |
 | Cost of the indexes on ingest | composite +61 %, partial +1 % |
 
 Three findings worth more than the speed-ups:
