@@ -40,6 +40,7 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
+telemetry.instrument_app(app)
 
 
 def require_key(x_api_key: str | None = Header(None)) -> None:

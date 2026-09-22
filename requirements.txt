@@ -8,3 +8,5 @@ psycopg-pool==3.3.2
 azure-identity==1.25.3
 # Traces and metrics to Application Insights; imported only when configured.
 azure-monitor-opentelemetry==1.8.10
+# Database spans for psycopg 3 (the Azure package only covers psycopg2).
+opentelemetry-instrumentation-psycopg==0.65b0

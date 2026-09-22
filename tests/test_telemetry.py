@@ -37,3 +37,8 @@ def test_ingest_records_the_batch_size(client, auth, recording, monkeypatch):
 
 def test_healthz_reports_whether_telemetry_is_on(client):
     assert client.get("/healthz").json() == {"status": "ok", "telemetry": False}
+
+
+def test_instrument_app_does_nothing_while_disabled():
+    """Called unconditionally in app.main; must be a no-op without telemetry."""
+    telemetry.instrument_app(object())

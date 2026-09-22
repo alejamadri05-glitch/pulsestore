@@ -5,9 +5,9 @@ runs and CI never import the Azure packages and never try to export anything. Un
 called, the instruments below are no-ops, which means the request handlers can record metrics
 unconditionally without caring whether telemetry is on.
 
-Known gap: azure-monitor-opentelemetry auto-instruments psycopg2, and this service uses
-psycopg 3, so database calls do not show up as dependencies on their own. Request duration and
-failures do, and the counters here cover the ingest path.
+Two instrumentations are attached explicitly rather than trusting auto-instrumentation:
+FastAPI, because `configure_azure_monitor()` patches the FastAPI constructor and that produced
+no request telemetry here, and psycopg 3, because the Azure package only instruments psycopg2.
 """
 
 import os
@@ -25,11 +25,12 @@ class _NoOpInstrument:
 
 annotations_ingested: object = _NoOpInstrument()
 ingest_batch_size: object = _NoOpInstrument()
+_enabled = False
 
 
 def setup_telemetry() -> bool:
     """Wire OpenTelemetry to Application Insights. Returns True when it was enabled."""
-    global annotations_ingested, ingest_batch_size
+    global annotations_ingested, ingest_batch_size, _enabled
 
     connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
     if not connection_string:
@@ -37,9 +38,11 @@ def setup_telemetry() -> bool:
 
     from azure.monitor.opentelemetry import configure_azure_monitor
     from opentelemetry import metrics
+    from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 
-    # Also instruments FastAPI, so request duration, status and failures arrive without code.
     configure_azure_monitor(connection_string=connection_string)
+    # Database calls as dependencies: the Azure package only instruments psycopg2.
+    PsycopgInstrumentor().instrument(enable_commenter=False)
     meter = metrics.get_meter("pulsestore")
     annotations_ingested = meter.create_counter(
         "annotations_ingested", unit="1", description="Beat annotations written"
@@ -47,4 +50,19 @@ def setup_telemetry() -> bool:
     ingest_batch_size = meter.create_histogram(
         "ingest_batch_size", unit="1", description="Annotations per request"
     )
+    _enabled = True
     return True
+
+
+def instrument_app(app) -> None:
+    """Trace HTTP requests of this app.
+
+    `configure_azure_monitor()` instruments the FastAPI class, which only covers apps created
+    afterwards; doing it on the instance is unambiguous. Measured: without this call, no request
+    telemetry reached Application Insights at all.
+    """
+    if not _enabled:
+        return
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    FastAPIInstrumentor.instrument_app(app)
