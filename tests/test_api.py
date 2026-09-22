@@ -32,7 +32,8 @@ def test_missing_or_wrong_api_key_is_401(client, recording, headers):
 
 
 def test_healthz_needs_no_key(client):
-    assert client.get("/healthz").json() == {"status": "ok"}
+    body = client.get("/healthz").json()
+    assert body["status"] == "ok"
 
 
 # --- error mapping: database errors become meaningful HTTP codes, never a 500 ---

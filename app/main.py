@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from psycopg import errors
 from psycopg.rows import dict_row
 
+from app import telemetry
 from app.db import pool
 from app.queries import (
     BEAT_DISTRIBUTION_ALL_SQL,
@@ -20,6 +21,9 @@ from app.schemas import (
     RecordingIn,
     SegmentBatch,
 )
+
+# Before the app exists, so the FastAPI instrumentation can attach to it.
+TELEMETRY_ENABLED = telemetry.setup_telemetry()
 
 
 @asynccontextmanager
@@ -59,7 +63,7 @@ def ensure_recording(conn, rid: int) -> None:
 def healthz():
     with pool.connection() as conn:
         conn.execute("SELECT 1")
-    return {"status": "ok"}
+    return {"status": "ok", "telemetry": TELEMETRY_ENABLED}
 
 
 @app.post("/recordings", status_code=201, dependencies=[Depends(require_key)])
@@ -121,6 +125,8 @@ def add_annotations(rid: int, batch: AnnotationBatch):
                     copy.write_row((rid, a.sample_index, a.symbol, a.aami_class))
     except errors.ForeignKeyViolation as exc:
         raise HTTPException(404, "Recording not found") from exc
+    telemetry.annotations_ingested.add(len(batch.items))
+    telemetry.ingest_batch_size.record(len(batch.items))
     return {"inserted": len(batch.items)}
 
 
