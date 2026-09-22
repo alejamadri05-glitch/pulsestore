@@ -86,36 +86,76 @@ in `shared_preload_libraries`.
 | Round trip from the author's laptop (Costa Rica) | < 1 ms | ~110 ms per statement | Network, not the database. The API will run next to the database, so its queries do not pay this. |
 | New connection | a few ms | ~1.2 s (TLS 1.3 + token validation) | Why the API keeps a connection pool rather than connecting per request. |
 
-## API authentication: Entra tokens instead of a password
+## The API on Azure Container Apps
 
-`app/db.py` has two modes, chosen by `DB_AUTH`:
+```bash
+az containerapp env create -g rg-pulsestore -n cae-pulsestore-wp -l northcentralus \
+  --enable-workload-profiles --logs-destination log-analytics \
+  --logs-workspace-id <workspace> --logs-workspace-key <key> --tags <the seven tags>
 
-| `DB_AUTH` | `DATABASE_URL` | Used by |
+az containerapp create -g rg-pulsestore -n pulsestore-api --environment cae-pulsestore-wp \
+  --image ghcr.io/alejamadri05-glitch/pulsestore:latest \
+  --target-port 8000 --ingress external \
+  --min-replicas 0 --max-replicas 2 --cpu 0.25 --memory 0.5Gi \
+  --secrets api-key=<generated> db-password=<generated> \
+  --env-vars DB_AUTH=password \
+    "DATABASE_URL=postgresql://pulse_app@<server>.postgres.database.azure.com:5432/pulsestore?sslmode=require" \
+    PGPASSWORD=secretref:db-password API_KEY=secretref:api-key \
+  --tags <the seven tags>
+```
+
+Measured from Costa Rica: **0.33 s warm**, **~7 s cold start** (the app scales to zero, so the
+first request after an idle period pays for the container start and the connection pool).
+`/docs` is public; every other endpoint answers 401 without the API key, and with a wrong one.
+
+### Managed identity was the plan, and it is not possible here
+
+The design was passwordless: the app would take an Entra token from a managed identity, exactly
+as the laptop does with `az login`. It is implemented in `app/db.py` (`DB_AUTH=entra`) and
+verified against this server. It is **not** what the deployed app uses, for a platform reason:
+
+1. **User-assigned identities are denied** by a policy on the subscription's management group
+   (`Deny user-assigned managed identities`, effect `deny`, targeting
+   `Microsoft.ManagedIdentity/userAssignedIdentities`).
+2. **System-assigned identity is accepted at creation but breaks every later update.** The app
+   was created with one and it worked: it authenticated to PostgreSQL as a role mapped with
+   `pgaadauth_create_principal_with_oid` and served requests. But any update, through the CLI or
+   a direct ARM PATCH, is refused with `ExpressEnvironmentFeatureNotSupported: 'System-assigned
+   managed identity' is not supported for container app on express environments`. An immutable
+   app cannot receive the Application Insights variable of the next phase, and the CI/CD deploy
+   action of the phase after that would fail the same way.
+3. **Express is the only environment mode available.** Managed identity is on the documented
+   list of features express does not support yet. Creating a standard environment returns
+   `ManagedEnvironmentModeNotSupported: The managed environment mode Standard is not currently
+   available in this region` — and the same in all five regions this subscription allows
+   (`northcentralus`, `canadacentral`, `mexicocentral`, `spaincentral`, `chilecentral`).
+
+So the deployed app authenticates with a password, and the code keeps both modes:
+
+| `DB_AUTH` | Used by | Credential |
 |---|---|---|
-| `password` (default) | includes the password | local Docker database, CI (Testcontainers) |
-| `entra` | **no password** | Azure. Each new connection gets a fresh Entra token as its password |
+| `password` | CI, local database, **the deployed app** | Password of `pulse_app`, a Container Apps secret injected as `PGPASSWORD` |
+| `entra` | Any laptop or host that has an Entra identity | A token per new connection, no stored secret |
 
-The token comes from `DefaultAzureCredential`: the Container App's managed identity in Azure,
-or the developer's `az login` on a laptop, so the same code runs in both places. PostgreSQL
-checks the password only when a connection opens, so pooled connections stay valid after
-their token expires and are never torn down for that reason. azure-identity caches tokens, so
-asking for one per new connection costs a network call about once an hour.
+**What that costs in security**, stated plainly: there is now a password for `pulse_app` and one
+for the server admin, where the design had none. Both are 25 random characters, generated on the
+operator's machine by `scripts/azure_app_password.sh`, never printed, stored in a file readable
+only by that user and meant to be moved into a password manager. Human access still uses Entra
+only. The alternative was Azure App Service (~USD 13/month), which supports managed identity;
+it was rejected for a portfolio project whose whole compute bill is otherwise zero.
 
-Verified twice:
+### The outbound IP changes, so pinning the firewall is a script
 
-- **Without Azure**, in `tests/test_db.py`: a fake credential hands out the test role's real
-  password as its "token". The connection succeeds, one token is requested per new
-  connection, and the same connection string without the token is refused.
-- **Against Azure**: the API ran on the laptop with `DB_AUTH=entra` and a connection string
-  with no password, took its token from `az login`, and served `/healthz` and queries from the
-  Azure database.
+`az containerapp show --query properties.outboundIpAddresses` returns nothing on these
+environments, and the address changes when the app is recreated: it moved from `52.162.220.32`
+to `135.232.251.133` in one afternoon. The database firewall therefore allows only the operator's
+IP and one pinned app address, and `scripts/azure_pin_app_ip.sh` re-pins it: it opens the
+firewall to Azure services, wakes the app, reads the address it actually connected from in
+`pg_stat_activity`, pins that, and removes the wide rule.
 
-`azure-identity` adds 33 MB to the image (293 → 326 MB), mostly `cryptography`. It is imported
-only in Entra mode.
-
-The image is published to GitHub Container Registry by the `image` job in
-`.github/workflows/ci.yml`: only on `main`, only after the tests pass, tagged with the commit
-SHA so a deployment names exactly the code it runs.
+That is the honest trade-off: a narrow rule that needs a script after each redeploy, instead of
+`0.0.0.0` (which means every Azure customer's resources, not just yours). Password or token
+authentication is still required either way.
 
 ## Things that went wrong while creating it
 
@@ -126,6 +166,13 @@ Recorded because each one will happen to the next person too:
 3. The create command made the server, then failed adding the firewall rule with
    `ServerIsBusy`: the server was still finishing. The rule had to be added separately
    (`firewall-rule create -s <server> --name <rule>`; the flag is `--name`, not `--rule-name`).
+4. Enabling password authentication needs an administrator login and password in the same
+   request; `az postgres flexible-server update --password-auth Enabled` crashed with an
+   internal traceback, and an ARM PATCH without the administrator fields was accepted and
+   silently changed nothing. `scripts/azure_app_password.sh` sends all three together.
+5. `az containerapp logs show` fails on express environments (`KeyError: 'eventStreamEndpoint'`)
+   and the `log-analytics` CLI extension does not install on this CLI build, so container logs
+   have to be read in the portal.
 
 None of the failed attempts created a billable resource.
 

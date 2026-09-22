@@ -12,16 +12,17 @@ tuning, least-privilege security and tests against a real database.
 
 ```mermaid
 flowchart LR
-  L[MIT-BIH loader] -->|HTTPS + API key| A[FastAPI service]
-  A -->|connection pool, least-privilege role| D[(PostgreSQL 16)]
-  G[GitHub Actions] -->|ruff + pytest on real Postgres| A
+  L[MIT-BIH loader] -->|HTTPS + API key| A[FastAPI on Azure Container Apps]
+  A -->|pool, least-privilege role, TLS| D[(Azure Database for PostgreSQL 16)]
+  G[GitHub Actions] -->|ruff + pytest on real Postgres| R[(ghcr.io image)]
+  R --> A
 ```
 
 The loader posts recordings the way a device fleet would: one recording, then its signal in
 10-second segments, then its beat annotations. The service writes annotations with `COPY` and
-serves heart rate per minute and filtered beat lists. The database runs on Azure Database for
-PostgreSQL Flexible Server with Microsoft Entra authentication only, so no password exists
-anywhere; the API moves to Azure Container Apps next ([docs/azure.md](docs/azure.md)).
+serves heart rate per minute and filtered beat lists. It runs on Azure: the database on Azure
+Database for PostgreSQL Flexible Server and the API on Azure Container Apps, scaled to zero
+([docs/azure.md](docs/azure.md)).
 
 ## Results
 
