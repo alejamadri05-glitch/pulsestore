@@ -11,7 +11,8 @@ _desktop_socket = pathlib.Path.home() / ".docker" / "run" / "docker.sock"
 if "DOCKER_HOST" not in os.environ and _desktop_socket.exists():
     os.environ["DOCKER_HOST"] = f"unix://{_desktop_socket}"
 
-from testcontainers.postgres import PostgresContainer  # noqa: E402
+# testcontainers.postgres is deprecated in 4.x in favour of the community package; same class.
+from testcontainers.community.postgres import PostgresContainer  # noqa: E402
 
 MIGRATIONS = sorted(pathlib.Path(__file__).parents[1].joinpath("migrations").glob("*.sql"))
 
@@ -62,6 +63,18 @@ def client(app_database_url):
 @pytest.fixture
 def auth():
     return {"x-api-key": "test-key"}
+
+
+@pytest.fixture
+def dead_pool():
+    """A pool that can never connect, to prove a code path did or did not reach the database.
+
+    Never opened, so it fails immediately with `PoolClosed` instead of spending a connect
+    timeout. Substitute it for `app.main.pool` with monkeypatch.
+    """
+    from psycopg_pool import ConnectionPool
+
+    return ConnectionPool("host=127.0.0.1 port=1 dbname=nope", min_size=0, max_size=1, open=False)
 
 
 @pytest.fixture

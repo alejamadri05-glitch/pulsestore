@@ -9,6 +9,11 @@ AamiClass = Literal["N", "S", "V", "F", "Q"]
 SUBJECT_CODE_PATTERN = r"^[A-Z0-9-]{3,32}$"
 
 
+# --- requests --------------------------------------------------------------------
+# Batch sizes are bounded here, so an oversized request is a 422 before it reaches the
+# database rather than a timeout inside it.
+
+
 class RecordingIn(BaseModel):
     device_serial: str = Field(min_length=1, max_length=64)
     device_model: str = Field(min_length=1, max_length=64)
@@ -37,6 +42,23 @@ class AnnotationIn(BaseModel):
 
 class AnnotationBatch(BaseModel):
     items: list[AnnotationIn] = Field(min_length=1, max_length=50_000)
+
+
+# --- responses -------------------------------------------------------------------
+# Declared so that /docs shows what each endpoint returns, and so a column added to a query
+# cannot leak into the API without someone naming it here.
+
+
+class Annotation(BaseModel):
+    sample_index: int = Field(description="Offset of the beat from the start of the recording")
+    symbol: str = Field(description="Original MIT-BIH annotation symbol")
+    aami_class: AamiClass
+
+
+class HeartRatePoint(BaseModel):
+    minute: int = Field(description="Minutes since the start of the recording")
+    mean_hr_bpm: float = Field(description="Mean rate over that minute, from RR intervals")
+    beats: int = Field(description="Beats that contributed an interval to the mean")
 
 
 class BeatDistribution(BaseModel):

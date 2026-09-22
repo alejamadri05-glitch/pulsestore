@@ -197,14 +197,11 @@ def test_beat_distribution_rejects_invalid_ids_and_missing_keys(client, auth):
     assert client.get("/stats/beat-distribution").status_code == 401
 
 
-def test_healthz_is_503_when_the_database_is_unreachable(client, monkeypatch):
+def test_healthz_is_503_when_the_database_is_unreachable(client, monkeypatch, dead_pool):
     """Discovered by load testing: the app must stay up and explain itself, not crash-loop."""
-    from psycopg_pool import ConnectionPool
-
     import app.main as main
 
-    dead = ConnectionPool("host=127.0.0.1 port=1 dbname=nope", min_size=0, max_size=1, open=False)
-    monkeypatch.setattr(main, "pool", dead)
+    monkeypatch.setattr(main, "pool", dead_pool)
     r = client.get("/healthz")
     assert r.status_code == 503
     assert "database unreachable" in r.json()["detail"]
@@ -228,23 +225,48 @@ def test_a_new_recording_invalidates_it_too(client, auth, recording):
     assert any(row["recording_id"] == recording for row in rows)
 
 
-def test_cache_is_used_within_its_window(client, auth, recording, monkeypatch):
+def test_cache_is_used_within_its_window(client, auth, recording, monkeypatch, dead_pool):
     import app.main as main
 
-    main.invalidate_distribution_cache()
+    main.distribution_cache.invalidate()
     first = client.get("/stats/beat-distribution", headers=auth).json()
     # If the second call reached the database, this dead pool would make it fail.
-    from psycopg_pool import ConnectionPool
-
-    dead = ConnectionPool("host=127.0.0.1 port=1 dbname=nope", min_size=0, max_size=1, open=False)
-    monkeypatch.setattr(main, "pool", dead)
+    monkeypatch.setattr(main, "pool", dead_pool)
     assert client.get("/stats/beat-distribution", headers=auth).json() == first
 
 
-def test_cache_can_be_switched_off(client, auth, monkeypatch):
+def test_one_recording_is_never_served_from_the_cache(
+    client, auth, recording, monkeypatch, dead_pool
+):
+    """Only the all-recordings query is cached; asking for one must still hit the database."""
+    from psycopg_pool import PoolClosed
+
     import app.main as main
 
-    monkeypatch.setattr(main, "DISTRIBUTION_CACHE_SECONDS", 0.0)
-    main.invalidate_distribution_cache()
-    client.get("/stats/beat-distribution", headers=auth)
-    assert main._cached_distribution() is None
+    client.get("/stats/beat-distribution", headers=auth)  # fills the cache
+    monkeypatch.setattr(main, "pool", dead_pool)
+    with pytest.raises(PoolClosed):
+        client.get("/stats/beat-distribution", params={"recording_id": recording}, headers=auth)
+
+
+# --- configuration ------------------------------------------------------------------
+
+
+def test_a_missing_or_empty_api_key_is_refused_at_startup(monkeypatch):
+    """An empty key would authenticate an empty header: compare_digest("", "") is true."""
+    import app.main as main
+
+    for value in ("", None):
+        if value is None:
+            monkeypatch.delenv("API_KEY", raising=False)
+        else:
+            monkeypatch.setenv("API_KEY", value)
+        with pytest.raises(RuntimeError, match="API_KEY"):
+            main.configured_api_key()
+
+
+def test_a_real_api_key_is_accepted(monkeypatch):
+    import app.main as main
+
+    monkeypatch.setenv("API_KEY", "a-real-key")
+    assert main.configured_api_key() == "a-real-key"

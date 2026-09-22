@@ -1,6 +1,5 @@
 import os
 import secrets
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -8,6 +7,7 @@ from psycopg import errors
 from psycopg.rows import dict_row
 
 from app import telemetry
+from app.cache import TimedCache
 from app.db import pool
 from app.queries import (
     BEAT_DISTRIBUTION_ALL_SQL,
@@ -17,8 +17,10 @@ from app.queries import (
 )
 from app.schemas import (
     AamiClass,
+    Annotation,
     AnnotationBatch,
     BeatDistribution,
+    HeartRatePoint,
     RecordingIn,
     SegmentBatch,
 )
@@ -28,20 +30,24 @@ from app.schemas import (
 # a bounded staleness for that work. Each replica caches separately, so after an ingest another
 # replica can serve up to DISTRIBUTION_CACHE_SECONDS of stale counts.
 DISTRIBUTION_CACHE_SECONDS = float(os.getenv("DISTRIBUTION_CACHE_SECONDS", "30"))
-_distribution_cache: tuple[float, list] | None = None
+distribution_cache: TimedCache[list] = TimedCache(DISTRIBUTION_CACHE_SECONDS)
 
 
-def _cached_distribution() -> list | None:
-    if _distribution_cache is None or DISTRIBUTION_CACHE_SECONDS <= 0:
-        return None
-    stored_at, rows = _distribution_cache
-    return rows if time.monotonic() - stored_at < DISTRIBUTION_CACHE_SECONDS else None
+def configured_api_key() -> str:
+    """The key every endpoint except `/healthz` requires.
+
+    Read once at import so a misconfigured deployment fails to start, instead of answering 500
+    to every authenticated request and looking like a code fault. An empty value is refused on
+    purpose: `compare_digest("", "")` is true, so an empty key would admit any caller who sends
+    an empty `x-api-key` header.
+    """
+    key = os.environ.get("API_KEY", "")
+    if not key:
+        raise RuntimeError("API_KEY must be set to a non-empty value")
+    return key
 
 
-def invalidate_distribution_cache() -> None:
-    global _distribution_cache
-    _distribution_cache = None
-
+API_KEY = configured_api_key()
 
 # Before the app exists, so the FastAPI instrumentation can attach to it.
 TELEMETRY_ENABLED = telemetry.setup_telemetry()
@@ -72,9 +78,7 @@ def require_key(x_api_key: str | None = Header(None)) -> None:
     # not a 422 (malformed request), which is what a required Header would produce.
     # compare_digest takes the same time whether the first or the last character is wrong,
     # so response timing does not leak how much of a guessed key was correct.
-    if x_api_key is None or not secrets.compare_digest(
-        x_api_key.encode(), os.environ["API_KEY"].encode()
-    ):
+    if x_api_key is None or not secrets.compare_digest(x_api_key.encode(), API_KEY.encode()):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
@@ -90,7 +94,10 @@ def healthz():
     try:
         with pool.connection(timeout=5) as conn:
             conn.execute("SELECT 1")
-    except Exception as exc:  # noqa: BLE001 - any failure to reach the database is unhealthy
+    # Deliberately every exception: any way of failing to reach the database is unhealthy, and
+    # the caller gets the class name rather than a bare timeout. The exception is re-raised as
+    # a 503, never swallowed.
+    except Exception as exc:
         raise HTTPException(
             status_code=503, detail=f"database unreachable: {type(exc).__name__}"
         ) from exc
@@ -124,7 +131,7 @@ def create_recording(body: RecordingIn):
         raise HTTPException(
             409, "This device already has a recording for that source record and lead"
         ) from exc
-    invalidate_distribution_cache()
+    distribution_cache.invalidate()
     return {"id": rec_id}
 
 
@@ -157,13 +164,17 @@ def add_annotations(rid: int, batch: AnnotationBatch):
                     copy.write_row((rid, a.sample_index, a.symbol, a.aami_class))
     except errors.ForeignKeyViolation as exc:
         raise HTTPException(404, "Recording not found") from exc
-    invalidate_distribution_cache()
+    distribution_cache.invalidate()
     telemetry.annotations_ingested.add(len(batch.items))
     telemetry.ingest_batch_size.record(len(batch.items))
     return {"inserted": len(batch.items)}
 
 
-@app.get("/recordings/{rid}/annotations", dependencies=[Depends(require_key)])
+@app.get(
+    "/recordings/{rid}/annotations",
+    response_model=list[Annotation],
+    dependencies=[Depends(require_key)],
+)
 def list_annotations(
     rid: int,
     start: int = Query(0, ge=0),
@@ -180,8 +191,18 @@ def list_annotations(
         return cur.fetchall()
 
 
-@app.get("/recordings/{rid}/heart-rate", dependencies=[Depends(require_key)])
+@app.get(
+    "/recordings/{rid}/heart-rate",
+    response_model=list[HeartRatePoint],
+    dependencies=[Depends(require_key)],
+)
 def heart_rate(rid: int):
+    """Mean heart rate per minute, from the RR intervals between consecutive beats.
+
+    `Q` annotations (paced or unclassifiable) are excluded: they are not beats, and counting
+    them would roughly double the rate. The first beat of a recording has no preceding one, so
+    it contributes no interval.
+    """
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         ensure_recording(conn, rid)
         cur.execute(HEART_RATE_SQL, {"rid": rid})
@@ -198,11 +219,12 @@ def beat_distribution(recording_id: int | None = Query(None, ge=1)):
 
     Recordings without annotations are included with zeros rather than left out, so a client
     can tell "no beats yet" from "no such recording" (which is a 404).
-    """
-    global _distribution_cache
 
+    Without `recording_id` the answer is cached for DISTRIBUTION_CACHE_SECONDS and cleared by
+    any ingest, because that is the one statement that reads every annotation.
+    """
     if recording_id is None:
-        cached = _cached_distribution()
+        cached = distribution_cache.get()
         if cached is not None:
             return cached
 
@@ -210,7 +232,7 @@ def beat_distribution(recording_id: int | None = Query(None, ge=1)):
         if recording_id is None:
             cur.execute(BEAT_DISTRIBUTION_ALL_SQL)
             rows = cur.fetchall()
-            _distribution_cache = (time.monotonic(), rows)
+            distribution_cache.set(rows)
             return rows
         ensure_recording(conn, recording_id)
         cur.execute(BEAT_DISTRIBUTION_ONE_SQL, {"rid": recording_id})
