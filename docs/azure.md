@@ -47,9 +47,14 @@ az postgres flexible-server create \
 az postgres flexible-server db create -g rg-pulsestore -s pulsestore-pg-sjlnu --name pulsestore
 ```
 
-**No passwords anywhere.** Password authentication is disabled on the server. The admin is a
-Microsoft Entra user who connects with a short-lived token from `az`; the API will connect with
-a managed identity (next phase). This is the "stretch" goal of the build guide's Phase 7.
+**The server was created with no passwords at all.** Password authentication was disabled and
+the admin is a Microsoft Entra user who connects with a short-lived token from `az`. This is
+the "stretch" goal of the build guide's Phase 7.
+
+> **Superseded for the application.** Password authentication was re-enabled later, because
+> the managed identity this design depended on is not available in this subscription. Human
+> access is still Entra-only. The section *Managed identity was the plan, and it is not
+> possible here* below has the evidence and what it costs.
 
 ```bash
 export PGHOST=pulsestore-pg-sjlnu.postgres.database.azure.com
@@ -144,18 +149,25 @@ only by that user and meant to be moved into a password manager. Human access st
 only. The alternative was Azure App Service (~USD 13/month), which supports managed identity;
 it was rejected for a portfolio project whose whole compute bill is otherwise zero.
 
-### The outbound IP changes, so pinning the firewall is a script
+### The outbound IP changes, and pinning it turned out to be a bad idea
 
 `az containerapp show --query properties.outboundIpAddresses` returns nothing on these
 environments, and the address changes when the app is recreated: it moved from `52.162.220.32`
-to `135.232.251.133` in one afternoon. The database firewall therefore allows only the operator's
-IP and one pinned app address, and `scripts/azure_pin_app_ip.sh` re-pins it: it opens the
-firewall to Azure services, wakes the app, reads the address it actually connected from in
-`pg_stat_activity`, pins that, and removes the wide rule.
+to `135.232.251.133` in one afternoon. The first answer was to pin it with a script
+(`scripts/azure_pin_app_ip.sh`): open the firewall to Azure services, wake the app, read the
+address it actually connected from in `pg_stat_activity`, pin that, remove the wide rule.
 
-That is the honest trade-off: a narrow rule that needs a script after each redeploy, instead of
-`0.0.0.0` (which means every Azure customer's resources, not just yours). Password or token
-authentication is still required either way.
+**The Phase 11 load test proved that wrong.** The address does not merely change on redeploy;
+it rotates *within a pool* while the app runs, so a second replica starting on another address
+could not reach the database at all. The firewall now allows Azure services, and the control
+that matters is authentication: the `pulse_app` password, over TLS, with a role that cannot
+delete a row.
+
+The honest trade-off, stated the other way round from before: `0.0.0.0` means any Azure
+customer's resources can reach the port, so the database's safety rests entirely on
+authentication and on least privilege — not on the network. Pinning is kept in the repository
+as optional hardening, and its header says what it costs: re-pinning after every replica
+change, or an outage.
 
 ## Monitoring, alerting and the drill
 
@@ -213,6 +225,24 @@ The alert was fired on purpose and written up in
 CPU held 83.3 % over five minutes, `pg_stat_statements` named the offending query in seconds,
 and `/healthz` stayed green the whole time, which is exactly why a health check is not a
 capacity alarm.
+
+## How a change reaches production
+
+There is no deploy job in CI, for the same reason there is no managed identity: an OIDC login
+to Azure needs either an Entra app registration — `az ad app create` is refused with
+*Insufficient privileges to complete the operation*, which a subscription Owner cannot grant
+itself because it is a directory permission — or a user-assigned identity, denied by policy.
+
+So the last step is a human running one command, and everything before it is automated:
+
+| Step | Who | What it proves |
+|---|---|---|
+| `ruff` + `pytest` against a real PostgreSQL 16 | CI, every push and PR | The code works against a real database, as the least-privilege role |
+| Build and push `ghcr.io/…:<sha>` | CI, `main` only | The registry never holds an image the tests rejected |
+| Boot that image against PostgreSQL and call it | CI, `main` only | The **artifact** starts, connects and enforces its API key — not just the source |
+| `./scripts/deploy.sh <sha>` | a person | The image exists, the app points at it, and `/healthz` is green afterwards |
+
+`deploy.sh` is idempotent and names what it deployed; `docs/runbook.md` covers rolling back.
 
 ## Things that went wrong while creating it
 

@@ -82,6 +82,8 @@ Three findings worth more than the speed-ups:
   `SELECT` and `INSERT` on four named tables plus one column-level `UPDATE`. Tests confirm that
   `DELETE`, `TRUNCATE`, other `UPDATE`s and any DDL are refused.
 - All SQL is parameterized. API keys are compared in constant time. No secrets in git.
+- The API key is validated at startup and may not be empty: `compare_digest("", "")` is true,
+  so an empty key would have authenticated any caller sending an empty header.
 - Dependabot watches pip and GitHub Actions.
 
 ## Run locally
@@ -104,21 +106,60 @@ DATABASE_URL=$ADMIN_DATABASE_URL .venv/bin/python scripts/bench_ingest.py
 DATABASE_URL=$ADMIN_DATABASE_URL PYTHONPATH=. .venv/bin/python scripts/bench_queries.py
 ```
 
+Lint, format and build the image exactly as CI does:
+
+```bash
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+docker build -t pulsestore-api .
+```
+
+Every variable the service reads is listed in [`.env.example`](.env.example) with its default.
+`DATABASE_URL` and `API_KEY` are required: the app raises at import without them, rather than
+starting and failing per request.
+
+## Repository layout
+
+```
+app/          FastAPI service: main.py routes, queries.py SQL, db.py pool and auth,
+              schemas.py request/response models, cache.py the one cached query,
+              telemetry.py optional Application Insights export
+migrations/   Numbered SQL, applied in order: schema, indexes, least-privilege role
+tests/        pytest against a real PostgreSQL 16 in Testcontainers, as the app role
+scripts/      Loader, benchmarks, and the Azure operations run by a person
+loadtest/     Locust scenario for the deployed service
+docs/         azure.md (what runs in Azure), results.md (every measured number),
+              runbook.md (what to do when it breaks), adr/ (why), postmortems/
+```
+
+Conventions worth knowing before the first pull request:
+
+- **SQL that the API sends lives in `app/queries.py`**, never built with f-strings, so
+  `scripts/bench_queries.py` measures the same statements the service runs.
+- **Claims carry their measurement.** A comment saying something is faster names the number and
+  `docs/results.md` reproduces it. When a measurement contradicted a decision, the document was
+  corrected rather than the measurement.
+- **Tests run as `pulse_app`**, the least-privilege role, so every test also proves the service
+  works without the privileges it was deliberately not granted.
+- Ruff (`line-length = 100`) gates CI for both lint and format; `RUF100` means a `# noqa` that
+  suppresses nothing fails the build.
+
 ## Status
 
 | Phase | State |
 |---|---|
 | Schema, ADRs, local API | Done |
 | Load all 48 records, ingest benchmark | Done |
-| Tests against real PostgreSQL (31) | Done |
+| Tests against real PostgreSQL (53) | Done |
 | Query tuning with before/after numbers | Done |
 | Least-privilege role, parameterized SQL, Dependabot | Done |
 | CI: lint and tests on every push | Done, green on GitHub (PostgreSQL 16 via Testcontainers) |
-| Docker image (326 MB, non-root, runtime deps only), published to GHCR from `main` | Done |
+| Docker image (346 MB, non-root, runtime deps only), published to GHCR from `main` | Done |
 | API authenticates to Azure with Entra tokens (`DB_AUTH=entra`), no password | Done, verified against Azure |
 | Azure Database for PostgreSQL: Entra-only auth, migrations, `pg_stat_statements` ([docs/azure.md](docs/azure.md)) | Done |
-| Azure: Container Apps, monitoring, OIDC deploy | Next |
-| Load test | Next |
+| API on Azure Container Apps, scaled to zero | Done, with a password: managed identity is denied in this subscription ([docs/azure.md](docs/azure.md)) |
+| Telemetry, CPU alert, runbook, alert drill | Done ([postmortem](docs/postmortems/2026-09-22-cpu-alert-drill.md)) |
+| Automated delivery | Done as far as the subscription allows: CI publishes and smoke-tests the image, a person runs `scripts/deploy.sh`. OIDC is impossible here — no directory permission for an app registration, and user-assigned identities are denied by policy |
+| Load test, and a change measured under it | Done: two bugs found, then a cache that halved database CPU ([docs/results.md](docs/results.md)) |
 
 ## Data
 

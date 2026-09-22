@@ -66,7 +66,7 @@ PGPASSWORD="$(az account get-access-token --resource-type oss-rdbms --query acce
 |---|---|---|
 | A sequential scan on `annotations` in `EXPLAIN` | An index is missing, usually after a migration or a restore | Re-apply `migrations/002_indexes.sql`; it is idempotent enough to read first |
 | One client hammering `POST /recordings/{id}/annotations` | A loader retry loop, or a backfill someone started | Stop the loader; ingest is not idempotent per segment, so check for 409s before restarting |
-| `beat-distribution` without `recording_id` called repeatedly | The only query that reads every row (807 buffers, ~56 ms on this tier) | Cache it, or always pass `recording_id`; see docs/results.md |
+| `beat-distribution` without `recording_id` reaching the database repeatedly | It is the only query that reads every row (807 buffers, ~56 ms on this tier). It is cached for 30 s per replica, so a steady stream of these means the cache is off (`DISTRIBUTION_CACHE_SECONDS=0`) or a writer is clearing it constantly | Check the variable; stop the writer, or pass `recording_id` |
 | High CPU with no slow statement | The burstable tier exhausted its CPU credits | Scale the tier temporarily (below), or wait for credits to refill |
 
 **Step 4: recover.** In increasing order of disruption:
@@ -86,17 +86,37 @@ az containerapp update -g rg-pulsestore -n pulsestore-api --min-replicas 0 --max
 **Step 5: write it down.** A short blameless note in `docs/postmortems/`: what fired, what you
 checked, what fixed it, what you would automate next time.
 
-## Symptom: HTTP 503 "App port is not ready"
+## Symptom: `/healthz` returns 503 `database unreachable: …`
 
-The container starts but its port never opens. The pool is opened at startup with
-`wait=True`, so **the app refuses to start when it cannot reach the database**. Almost always
-one of these:
+**The app is up and answering; it cannot reach PostgreSQL.** That is by design: the pool is
+opened without waiting, so the container starts even when the database is down and reports the
+failure, instead of dying at startup and crash-looping behind an opaque platform 503. (It did
+the opposite until the Phase 11 load test found it — see `docs/results.md`.) The detail names
+the exception class, which usually identifies the cause on its own.
 
-1. **The firewall does not list the app's outbound IP.** It changes whenever the app is
-   recreated, and ARM does not expose it. Fix: `./scripts/azure_pin_app_ip.sh`.
-2. **The database is stopped.** `az postgres flexible-server start -g rg-pulsestore -n pulsestore-pg-sjlnu`.
+1. **The database is stopped.** It is stopped between work sessions to save credit, and that
+   is the most common cause by far.
+   `az postgres flexible-server start -g rg-pulsestore -n pulsestore-pg-sjlnu`
+2. **The firewall does not allow the app.** The working rule is `AllowAzureServices`
+   (`0.0.0.0`). If the list instead shows a single pinned address, that is the failure mode the
+   load test exposed: the app's outbound address rotates within a pool, so a replica that
+   starts on another address cannot connect.
+   `az postgres flexible-server firewall-rule list -g rg-pulsestore -s pulsestore-pg-sjlnu -o table`
 3. **The `db-password` secret does not match the `pulse_app` role.** Re-run
    `./scripts/azure_app_password.sh`, which sets both sides at once.
+
+## Symptom: HTTP 503 "App port is not ready"
+
+This one comes from the platform, not the app, and means the process never started listening.
+Since the app now survives an unreachable database, a missing **required** variable is the
+likely cause: `DATABASE_URL` and `API_KEY` are both read at import and raise immediately, by
+design, so a misconfigured revision fails visibly instead of serving 500s. Check them against
+`.env.example`:
+
+```bash
+az containerapp show -g rg-pulsestore -n pulsestore-api \
+  --query "properties.template.containers[0].env[].name" -o tsv
+```
 
 Container logs are not available through `az containerapp logs show` on these environments
 (`KeyError: 'eventStreamEndpoint'`); read them in the portal, under the app's *Log stream*, or
@@ -120,8 +140,31 @@ az containerapp show -g rg-pulsestore -n pulsestore-api \
   --query "properties.template.containers[0].env[].name" -o tsv
 ```
 
-Note that database calls never appear as dependencies: the Azure package instruments psycopg2
-and this service uses psycopg 3. Request duration, failures and the two ingest metrics do.
+Database calls arrive as `postgresql` dependencies, but only because the image installs
+`opentelemetry-instrumentation-psycopg`: the Azure package ships the psycopg2 one, and this
+service uses psycopg 3. If dependencies are missing while requests still arrive, suspect that
+package. Request duration, failures and the two ingest metrics come from the app itself.
+
+## Rolling back a bad deploy
+
+Revisions are immutable and images are tagged by commit, so a rollback is a deploy of the
+previous commit. Find what is running and what ran before it:
+
+```bash
+az containerapp show -g rg-pulsestore -n pulsestore-api \
+  --query "properties.template.containers[0].image" -o tsv
+az containerapp revision list -g rg-pulsestore -n pulsestore-api \
+  --query "[].{revision:name, image:properties.template.containers[0].image, created:properties.createdTime}" -o table
+```
+
+```bash
+./scripts/deploy.sh <previous commit sha>
+```
+
+The script refuses a commit whose image was never published, waits for `/healthz`, and prints
+what ended up running. The database is **not** rolled back: the migrations only ever add
+objects, so an older image runs against a newer schema safely, but a rollback across a
+migration that changed a column would need its own plan.
 
 ## Cost controls
 

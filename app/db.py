@@ -1,10 +1,16 @@
 """Connection pool, with password or Microsoft Entra authentication.
 
-DB_AUTH=password (default): DATABASE_URL carries the password, as in local development and CI.
-DB_AUTH=entra: DATABASE_URL has no password. Each new connection gets a fresh Entra token as
-its password. In Azure the token comes from the app's managed identity; on a laptop, from the
-developer's `az login`. Password authentication is disabled on the Azure server, so no password
-exists anywhere (docs/azure.md).
+DB_AUTH=password (default): DATABASE_URL carries the password. Used by local development, CI
+**and the deployed app**, which takes the password from a Container Apps secret.
+
+DB_AUTH=entra: DATABASE_URL has no password; each new connection gets a fresh Entra token as
+its password, from whatever identity the host has — on a laptop, the developer's `az login`.
+
+Entra was meant to be how the deployed app connects, with a managed identity and no password
+anywhere. It is implemented and verified against the Azure server, but it is not what runs
+there: this subscription denies user-assigned identities by policy, and its Container Apps
+environments are "express", which does not support a system-assigned one. Both modes are kept
+because the constraint is the subscription's, not the design's (docs/azure.md).
 """
 
 import os
@@ -34,6 +40,11 @@ def entra_connection_class(credential) -> type[psycopg.Connection]:
 
 
 def make_pool(conninfo: str | None = None, auth: str | None = None, credential=None):
+    """A closed pool. Arguments override DATABASE_URL and DB_AUTH, which is what the tests use.
+
+    Returned closed (`open=False`) so importing this module never opens a socket: the app opens
+    it in its lifespan, and an unreachable database must not stop the process from starting.
+    """
     conninfo = conninfo if conninfo is not None else os.environ["DATABASE_URL"]
     auth = (auth or os.getenv("DB_AUTH", "password")).lower()
     options = {
