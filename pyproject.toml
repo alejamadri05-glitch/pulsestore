@@ -3,12 +3,16 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "S"]
-# S101: asserts are how pytest works. S311: `random` in the load test is not crypto.
-ignore = ["S101"]
+# S is flake8-bandit: it is what checks for hardcoded passwords and unsafe SQL construction.
+# BLE forbids swallowing every exception (it allows one that re-raises, which is what /healthz
+# does). RUF100 fails the build on a `# noqa` that suppresses nothing, so the suppressions in
+# the source stay true as the rule set changes.
+select = ["E", "F", "I", "UP", "B", "S", "BLE", "RUF100"]
 
 [tool.ruff.lint.per-file-ignores]
+# S101 asserts are how pytest works; S105/S106 are the throwaway passwords test fixtures need.
 "tests/*" = ["S101", "S105", "S106"]
+# S311: `random` picks which recording to request, which is not cryptography.
 "loadtest/*" = ["S311"]
 
 [tool.pytest.ini_options]

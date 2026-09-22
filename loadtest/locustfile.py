@@ -25,12 +25,12 @@ class Clinician(HttpUser):
 
     @task(6)
     def heart_rate(self):
-        rid = random.choice(RECORDINGS)  # noqa: S311 - not cryptography
+        rid = random.choice(RECORDINGS)
         self.client.get(f"/recordings/{rid}/heart-rate", headers=KEY, name="/heart-rate")
 
     @task(3)
     def abnormal_beats(self):
-        rid = random.choice(RECORDINGS)  # noqa: S311
+        rid = random.choice(RECORDINGS)
         self.client.get(
             f"/recordings/{rid}/annotations?aami_class=V&limit=500",
             headers=KEY,
@@ -39,7 +39,7 @@ class Clinician(HttpUser):
 
     @task(2)
     def distribution_of_one(self):
-        rid = random.choice(RECORDINGS)  # noqa: S311
+        rid = random.choice(RECORDINGS)
         self.client.get(
             f"/stats/beat-distribution?recording_id={rid}", headers=KEY, name="/distribution?id"
         )
