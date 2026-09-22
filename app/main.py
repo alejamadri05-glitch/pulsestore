@@ -1,5 +1,6 @@
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -21,6 +22,26 @@ from app.schemas import (
     RecordingIn,
     SegmentBatch,
 )
+
+# The distribution over every recording is the only query that reads all 109,494 annotations
+# (~56 ms server side, 807 buffers). Its answer changes only on ingest, so a short cache trades
+# a bounded staleness for that work. Each replica caches separately, so after an ingest another
+# replica can serve up to DISTRIBUTION_CACHE_SECONDS of stale counts.
+DISTRIBUTION_CACHE_SECONDS = float(os.getenv("DISTRIBUTION_CACHE_SECONDS", "30"))
+_distribution_cache: tuple[float, list] | None = None
+
+
+def _cached_distribution() -> list | None:
+    if _distribution_cache is None or DISTRIBUTION_CACHE_SECONDS <= 0:
+        return None
+    stored_at, rows = _distribution_cache
+    return rows if time.monotonic() - stored_at < DISTRIBUTION_CACHE_SECONDS else None
+
+
+def invalidate_distribution_cache() -> None:
+    global _distribution_cache
+    _distribution_cache = None
+
 
 # Before the app exists, so the FastAPI instrumentation can attach to it.
 TELEMETRY_ENABLED = telemetry.setup_telemetry()
@@ -103,6 +124,7 @@ def create_recording(body: RecordingIn):
         raise HTTPException(
             409, "This device already has a recording for that source record and lead"
         ) from exc
+    invalidate_distribution_cache()
     return {"id": rec_id}
 
 
@@ -135,6 +157,7 @@ def add_annotations(rid: int, batch: AnnotationBatch):
                     copy.write_row((rid, a.sample_index, a.symbol, a.aami_class))
     except errors.ForeignKeyViolation as exc:
         raise HTTPException(404, "Recording not found") from exc
+    invalidate_distribution_cache()
     telemetry.annotations_ingested.add(len(batch.items))
     telemetry.ingest_batch_size.record(len(batch.items))
     return {"inserted": len(batch.items)}
@@ -176,10 +199,19 @@ def beat_distribution(recording_id: int | None = Query(None, ge=1)):
     Recordings without annotations are included with zeros rather than left out, so a client
     can tell "no beats yet" from "no such recording" (which is a 404).
     """
+    global _distribution_cache
+
+    if recording_id is None:
+        cached = _cached_distribution()
+        if cached is not None:
+            return cached
+
     with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         if recording_id is None:
             cur.execute(BEAT_DISTRIBUTION_ALL_SQL)
-        else:
-            ensure_recording(conn, recording_id)
-            cur.execute(BEAT_DISTRIBUTION_ONE_SQL, {"rid": recording_id})
+            rows = cur.fetchall()
+            _distribution_cache = (time.monotonic(), rows)
+            return rows
+        ensure_recording(conn, recording_id)
+        cur.execute(BEAT_DISTRIBUTION_ONE_SQL, {"rid": recording_id})
         return cur.fetchall()

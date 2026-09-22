@@ -208,3 +208,43 @@ def test_healthz_is_503_when_the_database_is_unreachable(client, monkeypatch):
     r = client.get("/healthz")
     assert r.status_code == 503
     assert "database unreachable" in r.json()["detail"]
+
+
+# --- distribution cache ------------------------------------------------------------
+
+
+def test_ingest_invalidates_the_distribution_cache(client, auth, recording):
+    """A cached total must never hide beats that were just written."""
+    before = client.get("/stats/beat-distribution", headers=auth).json()
+    total_before = sum(row["total"] for row in before)
+    items = [{"sample_index": 360 * i, "symbol": "V", "aami_class": "V"} for i in range(1, 6)]
+    client.post(f"/recordings/{recording}/annotations", json={"items": items}, headers=auth)
+    after = client.get("/stats/beat-distribution", headers=auth).json()
+    assert sum(row["total"] for row in after) == total_before + 5
+
+
+def test_a_new_recording_invalidates_it_too(client, auth, recording):
+    rows = client.get("/stats/beat-distribution", headers=auth).json()
+    assert any(row["recording_id"] == recording for row in rows)
+
+
+def test_cache_is_used_within_its_window(client, auth, recording, monkeypatch):
+    import app.main as main
+
+    main.invalidate_distribution_cache()
+    first = client.get("/stats/beat-distribution", headers=auth).json()
+    # If the second call reached the database, this dead pool would make it fail.
+    from psycopg_pool import ConnectionPool
+
+    dead = ConnectionPool("host=127.0.0.1 port=1 dbname=nope", min_size=0, max_size=1, open=False)
+    monkeypatch.setattr(main, "pool", dead)
+    assert client.get("/stats/beat-distribution", headers=auth).json() == first
+
+
+def test_cache_can_be_switched_off(client, auth, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "DISTRIBUTION_CACHE_SECONDS", 0.0)
+    main.invalidate_distribution_cache()
+    client.get("/stats/beat-distribution", headers=auth)
+    assert main._cached_distribution() is None
