@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Pins the database firewall to the Container App's current outbound IP address.
 #
-# Why this exists: `az containerapp show --query properties.outboundIpAddresses` returns nothing
+# OPTIONAL HARDENING, and not what the deployment uses. Load testing showed why: the outbound
+# address rotates within a pool, so a replica that starts on an unpinned address cannot reach
+# the database and the container dies at startup. The firewall therefore allows Azure services,
+# and authentication is the control that matters. Use this script only if you accept re-pinning
+# after every replica change (docs/azure.md).
+#
+# Why it reads the address the way it does: `az containerapp show --query properties.outboundIpAddresses` returns nothing
 # on the environments available in this subscription, and the address changes whenever the app is
 # recreated. So the address is read where it is visible for certain: pg_stat_activity, after the
 # app connects. The script opens the firewall to Azure services just long enough for the app to

@@ -28,7 +28,10 @@ TELEMETRY_ENABLED = telemetry.setup_telemetry()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    pool.open(wait=True)
+    # Not wait=True: a database that is briefly unreachable used to kill the container at
+    # startup, so the platform answered an opaque 503 and the replica crash-looped. Now the
+    # service starts, /healthz says what is wrong, and the pool reconnects on its own.
+    pool.open()
     yield
     pool.close()
 
@@ -62,8 +65,14 @@ def ensure_recording(conn, rid: int) -> None:
 
 @app.get("/healthz")
 def healthz():
-    with pool.connection() as conn:
-        conn.execute("SELECT 1")
+    """200 only when the database answers. 503 names what failed, instead of a bare timeout."""
+    try:
+        with pool.connection(timeout=5) as conn:
+            conn.execute("SELECT 1")
+    except Exception as exc:  # noqa: BLE001 - any failure to reach the database is unhealthy
+        raise HTTPException(
+            status_code=503, detail=f"database unreachable: {type(exc).__name__}"
+        ) from exc
     return {"status": "ok", "telemetry": TELEMETRY_ENABLED}
 
 

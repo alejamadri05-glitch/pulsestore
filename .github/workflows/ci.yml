@@ -33,6 +33,12 @@ jobs:
   # Publishes the API image to GitHub Container Registry, only from main and only after the
   # tests pass, so the registry never holds an image CI rejected. Azure Container Apps pulls
   # it from there (free for public images; Azure Container Registry would bill ~USD 5/month).
+  #
+  # There is no deploy job: an OIDC login to Azure needs an Entra app registration (refused,
+  # directory permissions) or a user-assigned managed identity (denied by policy) in this
+  # subscription. See docs/azure.md. The deploy is ./scripts/deploy.sh, run by a human, and
+  # what CI can verify on its own it does: the smoke-test job below boots the published image
+  # against a real PostgreSQL before anyone deploys it.
   image:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -56,3 +62,54 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.sha }}
             ghcr.io/${{ github.repository }}:latest
+
+  # Proves the published image starts, connects to a database and serves requests. The unit
+  # tests exercise the code; this exercises the artifact that actually gets deployed.
+  smoke-test:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pulse
+          POSTGRES_PASSWORD: pulse
+          POSTGRES_DB: pulsestore
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pulse -d pulsestore"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Apply the migrations
+        run: |
+          for f in migrations/*.sql; do
+            PGPASSWORD=pulse psql -h localhost -U pulse -d pulsestore -v ON_ERROR_STOP=1 -f "$f"
+          done
+          PGPASSWORD=pulse psql -h localhost -U pulse -d pulsestore -c \
+            "ALTER ROLE pulse_app WITH LOGIN PASSWORD 'smoke-test'"
+      - name: Run the published image
+        run: |
+          docker run -d --name api --network host \
+            -e DATABASE_URL="postgresql://pulse_app@localhost:5432/pulsestore" \
+            -e PGPASSWORD=smoke-test -e API_KEY=smoke-test \
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          for i in $(seq 1 30); do
+            curl -sf localhost:8000/healthz && break
+            sleep 2
+          done
+      - name: Exercise it
+        run: |
+          set -e
+          curl -sf localhost:8000/healthz | grep -q '"status":"ok"'
+          # An empty database still answers, and unknown ids are 404 rather than 500.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'x-api-key: smoke-test' \
+            localhost:8000/stats/beat-distribution)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'x-api-key: smoke-test' \
+            localhost:8000/recordings/999/heart-rate)" = 404
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/stats/beat-distribution)" = 401
+          echo "The published image boots, reaches PostgreSQL and enforces its API key."
+      - name: Container logs if it failed
+        if: failure()
+        run: docker logs api || echo "the container never started"

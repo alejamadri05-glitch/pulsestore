@@ -1,0 +1,6 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+GET,/healthz,HTTPError('503 Server Error: Service Unavailable for url: /healthz'),5,2026-09-22T02:59:45Z,2026-09-22T03:01:23Z
+GET,/distribution (all),HTTPError('503 Server Error: Service Unavailable for url: /distribution (all)'),6,2026-09-22T02:59:47Z,2026-09-22T03:01:17Z
+GET,/distribution?id,HTTPError('503 Server Error: Service Unavailable for url: /distribution?id'),14,2026-09-22T02:59:13Z,2026-09-22T03:01:25Z
+GET,/heart-rate,HTTPError('503 Server Error: Service Unavailable for url: /heart-rate'),46,2026-09-22T02:59:13Z,2026-09-22T03:01:25Z
+GET,/annotations?V,HTTPError('503 Server Error: Service Unavailable for url: /annotations?V'),24,2026-09-22T02:59:13Z,2026-09-22T03:01:28Z

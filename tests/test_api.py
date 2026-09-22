@@ -195,3 +195,16 @@ def test_beat_distribution_for_unknown_recording_is_404(client, auth):
 def test_beat_distribution_rejects_invalid_ids_and_missing_keys(client, auth):
     assert client.get("/stats/beat-distribution?recording_id=0", headers=auth).status_code == 422
     assert client.get("/stats/beat-distribution").status_code == 401
+
+
+def test_healthz_is_503_when_the_database_is_unreachable(client, monkeypatch):
+    """Discovered by load testing: the app must stay up and explain itself, not crash-loop."""
+    from psycopg_pool import ConnectionPool
+
+    import app.main as main
+
+    dead = ConnectionPool("host=127.0.0.1 port=1 dbname=nope", min_size=0, max_size=1, open=False)
+    monkeypatch.setattr(main, "pool", dead)
+    r = client.get("/healthz")
+    assert r.status_code == 503
+    assert "database unreachable" in r.json()["detail"]
